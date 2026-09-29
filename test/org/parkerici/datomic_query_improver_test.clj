@@ -100,3 +100,107 @@
             []]]]
     (testing (pr-str q)
       (apply check-improved q inputs))))
+
+(def by-artist-rules
+  ;; [?a] is a required binding: the rule can't be called with ?a unbound
+  '[[(by-artist [?a] ?r) [?r :release/artists ?a]]])
+
+(def complex-queries
+  "Queries whose clauses depend on bindings from other clauses in ways that
+  aren't visible from a clause's top level vars, as [query inputs]."
+  [;; https://github.com/ParkerICI/datomic-query-improver/issues/1 (case 1)
+   ['[:find ?a
+      :in $ ?country
+      :where
+      [?a :artist/country ?country]
+      (or-join [?a] [(missing? $ ?a :artist/active)])]
+    ["C1"]]
+   ;; https://github.com/ParkerICI/datomic-query-improver/issues/1 (case 2)
+   ['[:find ?a
+      :in $ ?country
+      :where
+      [?a :artist/country ?country]
+      (or-join [?a] (not-join [?a] [?a :artist/active _]))]
+    ["C1"]]
+   ['[:find ?r
+      :where
+      [?r :release/year ?y]
+      [(> ?y 1995)]
+      [?r :release/label ?l]
+      [?l :label/name "Label 1"]]
+    []]
+   ['[:find ?t ?mins
+      :where
+      [?t :track/duration ?d]
+      [(quot ?d 60) ?mins]
+      [?t :track/release ?r]
+      [?r :release/year 1970]]
+    []]
+   ['[:find ?a
+      :where
+      [?a :artist/country "C2"]
+      (not [?a :artist/active true])]
+    []]
+   ['[:find ?a
+      :where
+      [?a :artist/country "C0"]
+      (not-join [?a]
+        [?r :release/artists ?a]
+        [?r :release/year 1999])]
+    []]
+   ['[:find ?r
+      :where
+      [?r :release/label ?l]
+      [?l :label/name "Label 4"]
+      (or [?r :release/format :release.format/lp]
+          [?r :release/format :release.format/cd])]
+    []]
+   ['[:find ?r
+      :where
+      [?r :release/label ?l]
+      [?l :label/name "Label 2"]
+      (or-join [?r]
+        (and [?r :release/year ?y]
+             [(< ?y 1965)])
+        [?r :release/format :release.format/digital])]
+    []]
+   ['[:find ?name
+      :in $ %
+      :where
+      [?a :artist/name "Artist 3"]
+      (by-artist ?a ?r)
+      [?r :release/name ?name]]
+    [by-artist-rules]]
+   ['[:find ?t
+      :in $ [?y ...]
+      :where
+      [?t :track/release ?r]
+      [?r :release/year ?y]]
+    [[1970 1971]]]
+   ['[:find ?r
+      :in $ [[?aname ?year]]
+      :where
+      [?r :release/artists ?a]
+      [?r :release/year ?year]
+      [?a :artist/name ?aname]]
+    [[["Artist 1" 1980] ["Artist 2" 1990] ["Artist 3" 1985]]]]
+   ['[:find ?a
+      :in $
+      :where
+      [$ ?a :artist/country "C1"]
+      [(ground true) ?active]
+      [$ ?a :artist/active ?active]]
+    []]
+   ['[:find ?r ?yy
+      :where
+      [?r :release/label ?l]
+      [?l :label/name "Label 5"]
+      [?r :release/year ?y]
+      [(+ ?y 1) ?y1]
+      [(str ?y1) ?yy]]
+    []]])
+
+(deftest complex-queries-stay-valid
+  (doseq [[q inputs] complex-queries]
+    (testing (pr-str q)
+      (check-suggestion q inputs))))

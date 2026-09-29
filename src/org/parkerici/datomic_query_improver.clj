@@ -4,7 +4,7 @@
 (defn- ->map-form
   "Converts list form Datomic query into map form."
   [q-edn]
-  (->> (partition-by #{:find :in :where :with} q-edn)
+  (->> (partition-by #{:find :keys :syms :strs :with :in :where} q-edn)
        (partition-all 2)
        (map (fn [[k v]]
               [(first k) (vec v)]))

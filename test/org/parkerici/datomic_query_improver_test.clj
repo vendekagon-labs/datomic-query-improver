@@ -40,6 +40,29 @@
   (is (= '{:find [?e] :with [?n] :where [[?e :artist/name ?n]]}
          (suggest '[:find ?e :with ?n :where [?e :artist/name ?n]]))))
 
+(deftest list-form-return-maps
+  (is (= '{:find [?e ?n] :keys [e n] :where [[?e :artist/name ?n]]}
+         (suggest '[:find ?e ?n :keys e n :where [?e :artist/name ?n]])))
+  (is (= '{:find [?e] :strs [e] :in [$] :where [[?e :artist/name "Artist 1"]]}
+         (suggest '[:find ?e :strs e :in $ :where [?e :artist/name "Artist 1"]])))
+  (testing "the suggested query runs and returns maps"
+    (is (= '[e]
+           (mapcat keys (:result (run (suggest '[:find ?e :syms e :where [?e :artist/name "Artist 1"]]))))))))
+
+(deftest duplicate-clauses-are-kept
+  (is (= '[[?a :artist/active true] [?a :artist/active true] [?a :artist/country "C1"]]
+         (:where (suggest '[:find ?a :where
+                            [?a :artist/country "C1"]
+                            [?a :artist/active true]
+                            [?a :artist/active true]])))))
+
+(deftest ties-keep-original-order
+  (testing "attributes missing from the stats tie at 0 datoms"
+    (is (= '[[?a :no/stats-1 1] [?a :no/stats-2 2] [?a :no/stats-3 3]]
+           (:where (sut/suggest {} '[:find ?a :where [?a :no/stats-1 1] [?a :no/stats-2 2] [?a :no/stats-3 3]]))))
+    (is (= '[[?a :no/stats-3 3] [?a :no/stats-2 2] [?a :no/stats-1 1]]
+           (:where (sut/suggest {} '[:find ?a :where [?a :no/stats-3 3] [?a :no/stats-2 2] [?a :no/stats-1 1]]))))))
+
 (deftest map-form-keys-are-kept
   (is (= '{:find [?e] :keys [e] :where [[?e :artist/name "Artist 1"]]}
          (suggest '{:find [?e] :keys [e] :where [[?e :artist/name "Artist 1"]]}))))

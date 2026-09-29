@@ -140,14 +140,37 @@
           (and v-known distinct-values) (/ count (max 1 distinct-values))
           :else count)))))
 
+(defn- filter-selectivity
+  "Assumed fraction of rows kept by a clause that only removes rows, using
+  System R's classic defaults: 1/3 for a predicate (as for a range predicate)
+  and 9/10 for not / not-join (the negation of an equality predicate, 1/10);
+  nil for clauses that don't only remove rows."
+  [{:keys [kind binds]}]
+  (cond
+    (#{:not :not-join} kind) 9/10
+    (and (= :expression kind) (empty? binds)) 1/3))
+
+(defn- filters-enabled
+  "The combined selectivity of the pending filter clauses that placing info
+  next would make ready."
+  [bound pending info]
+  (let [bound-after (set/union bound (:binds info))]
+    (->> pending
+         (filter #(and (not (set/subset? (:requires %) bound))
+                       (set/subset? (:requires %) bound-after)))
+         (keep filter-selectivity)
+         (reduce * 1))))
+
 (defn- score
   "Ranks a clause (as per clause-info) that is ready to be placed next, given
-  the vars bound so far; lowest is best. Heuristics, in order: join along
-  (fewest new vars), most selective (fewest estimated datoms), then the
-  clause's original position."
-  [attr-stats bound {:keys [binds index] :as info}]
+  the vars bound so far and the clauses still to place; lowest is best.
+  Heuristics, in order: join along (fewest new vars), most selective (fewest
+  estimated datoms, less for each pending filter the clause lets run next),
+  then the clause's original position."
+  [attr-stats bound pending {:keys [binds index] :as info}]
   [(count (set/difference binds bound))
-   (estimated-datoms attr-stats bound info)
+   (* (estimated-datoms attr-stats bound info)
+      (filters-enabled bound pending info))
    index])
 
 (defn suggest
@@ -176,7 +199,7 @@
         (assoc q :where out-ordering)
         (let [ready (filter #(set/subset? (:requires %) bound) remaining)
               best (if (seq ready)
-                     (apply min-key* #(score attr-stats bound %) ready)
+                     (apply min-key* #(score attr-stats bound remaining %) ready)
                      ;; nothing's requirements are met (e.g. a predicate that the original
                      ;; query placed before its inputs are bound): keep original order
                      (first remaining))]

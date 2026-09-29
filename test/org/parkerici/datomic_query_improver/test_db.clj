@@ -66,40 +66,70 @@
         (for [{:keys [db/ident]} schema]
           [ident (count (seq (d/datoms db :aevt ident)))])))
 
-(def ^:dynamic *attr-counts* nil)
+(defn attr-stats
+  "Datom, distinct value and distinct entity counts per attribute, the richer
+  stats form `suggest` accepts."
+  [db]
+  (into {}
+        (for [{:keys [db/ident]} schema
+              :let [datoms (seq (d/datoms db :aevt ident))]]
+          [ident {:count (count datoms)
+                  :distinct-values (count (distinct (map :v datoms)))
+                  :distinct-entities (count (distinct (map :e datoms)))}])))
 
-(defn create-db []
+(def ^:dynamic *attr-counts* nil)
+(def ^:dynamic *attr-stats* nil)
+
+(defn create-db
+  "Creates and populates an in-memory database, returning [uri conn]."
+  []
   (let [uri (str "datomic:mem://query-improver-test-" (random-uuid))]
     (d/create-database uri)
     (let [conn (d/connect uri)]
       @(d/transact conn schema)
       @(d/transact conn (data))
-      [uri (d/db conn)])))
+      [uri conn])))
 
 (defn with-db
-  "clojure.test fixture binding *db* and *attr-counts*."
+  "clojure.test fixture binding *db*, *attr-counts* and *attr-stats*."
   [f]
-  (let [[uri db] (create-db)]
+  (let [[uri conn] (create-db)
+        db (d/db conn)]
     (try
       (binding [*db* db
-                *attr-counts* (attr-counts db)]
+                *attr-counts* (attr-counts db)
+                *attr-stats* (attr-stats db)]
         (f))
       (finally
         (d/delete-database uri)))))
+
+(def ^:dynamic *timeout-ms*
+  "Datomic query timeout used by run, if any."
+  nil)
+
+(defn- timeout? [e]
+  (some #(instance? java.util.concurrent.TimeoutException %)
+        (take-while some? (iterate ex-cause e))))
 
 (defn run
   "Runs query q (list or map form) with inputs, returning {:result .. :rows ..}
   where :rows is the total rows produced by every clause per Datomic's
   query-stats: a deterministic measure of how much work the ordering caused.
-  Errors are returned as {:error ..} rather than thrown."
+  Errors are returned as {:error ..} rather than thrown, and running out of
+  time (see *timeout-ms*) as {:error :timeout}."
   [q & inputs]
-  (try
-    (let [{:keys [ret query-stats]} (d/query {:query q
-                                              :args (cons *db* inputs)
-                                              :query-stats true})]
-      {:result ret
-       :rows (reduce + (for [phase (:phases query-stats)
-                             clause (:clauses phase)]
-                         (:rows-out clause 0)))})
-    (catch Throwable e
-      {:error (or (:db/error (ex-data e)) (ex-message e))})))
+  (let [arg-map {:query q :args (cons *db* inputs)}]
+    (try
+      ;; Datomic doesn't enforce :timeout when collecting :query-stats, so
+      ;; check the query completes in time before running it again for stats.
+      (when *timeout-ms*
+        (d/query (assoc arg-map :timeout *timeout-ms*)))
+      (let [{:keys [ret query-stats]} (d/query (assoc arg-map :query-stats true))]
+        {:result ret
+         :rows (reduce + (for [phase (:phases query-stats)
+                               clause (:clauses phase)]
+                           (:rows-out clause 0)))})
+      (catch Throwable e
+        (if (timeout? e)
+          {:error :timeout}
+          {:error (or (:db/error (ex-data e)) (ex-message e))})))))

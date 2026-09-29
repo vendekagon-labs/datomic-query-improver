@@ -5,13 +5,23 @@
   [{:db/ident :query-optimizer.statistics/datom-count
     :db/valueType :db.type/long
     :db/cardinality :db.cardinality/one
-    :db/doc "Metadata installed by datomic-query-optimizer to track counts of attributes."}])
+    :db/doc "Metadata installed by datomic-query-optimizer to track counts of attributes."}
+   {:db/ident :query-optimizer.statistics/distinct-values
+    :db/valueType :db.type/long
+    :db/cardinality :db.cardinality/one
+    :db/doc "Metadata installed by datomic-query-optimizer: distinct values of an attribute."}
+   {:db/ident :query-optimizer.statistics/distinct-entities
+    :db/valueType :db.type/long
+    :db/cardinality :db.cardinality/one
+    :db/doc "Metadata installed by datomic-query-optimizer: distinct entities with an attribute."}])
 
 (defn schema-installed? [db]
-  (seq (d/q '[:find [?e ...]
-              :where
-              [?e :db/ident :query-optimizer.statistics/datom-count]]
-            db)))
+  (= (count schema)
+     (count (d/q '[:find [?e ...]
+                   :in $ [?ident ...]
+                   :where
+                   [?e :db/ident ?ident]]
+                 db (map :db/ident schema)))))
 
 (defn install-schema [conn]
   (let [db (d/db conn)]
@@ -39,24 +49,35 @@
 
 (defn stats-attr?
   [db eid]
-  (#{:query-optimizer.statistics/datom-count} (eid->ident db eid)))
+  ((set (map :db/ident schema)) (eid->ident db eid)))
 
 (defn installed-attrs [db]
   (->> (all-attrs db)
        (remove (partial schema-attr? db))
        (remove (partial stats-attr? db))))
 
-(defn attr->count [db attr]
-  (count (seq (d/datoms db :aevt attr))))
+(defn attr->stats
+  "Datom count, distinct values and distinct entities for attr, in one pass."
+  [db attr]
+  (let [[n vs es] (reduce (fn [[n vs es] datom]
+                            [(inc n) (conj! vs (:v datom)) (conj! es (:e datom))])
+                          [0 (transient #{}) (transient #{})]
+                          (d/datoms db :aevt attr))]
+    {:count n
+     :distinct-values (count (persistent! vs))
+     :distinct-entities (count (persistent! es))}))
 
-(defn count-attributes [db]
+(defn attribute-stats [db]
   (let [attrs (installed-attrs db)]
     (zipmap (map (partial eid->ident db) attrs)
-            (map (partial attr->count db) attrs))))
+            (map (partial attr->stats db) attrs))))
 
 (defn create-tx-data [db]
-  (for [[attr count-stat] (count-attributes db)]
-    {:db/id attr :query-optimizer.statistics/datom-count count-stat}))
+  (for [[attr {:keys [count distinct-values distinct-entities]}] (attribute-stats db)]
+    {:db/id attr
+     :query-optimizer.statistics/datom-count count
+     :query-optimizer.statistics/distinct-values distinct-values
+     :query-optimizer.statistics/distinct-entities distinct-entities}))
 
 (defn update! [conn]
   (install-schema conn)
@@ -65,10 +86,24 @@
     @(d/transact conn updates)))
 
 
-(defn retrieve [db]
-  (->> (d/datoms db :aevt :query-optimizer.statistics/datom-count)
-       (map (fn [[e a v]]
-              [(eid->ident db e) v]))
+(defn retrieve
+  "Stored stats per attribute ident, in the form `suggest` accepts: a map of
+  {:count :distinct-values :distinct-entities}, or just the datom count for
+  stats stored before distinct counts were tracked."
+  [db]
+  (->> (d/q '[:find ?attr ?count ?distinct-values ?distinct-entities
+              :where
+              [?a :query-optimizer.statistics/datom-count ?count]
+              [?a :db/ident ?attr]
+              [(get-else $ ?a :query-optimizer.statistics/distinct-values -1) ?distinct-values]
+              [(get-else $ ?a :query-optimizer.statistics/distinct-entities -1) ?distinct-entities]]
+            db)
+       (map (fn [[attr count distinct-values distinct-entities]]
+              [attr (if (neg? distinct-values)
+                      count
+                      {:count count
+                       :distinct-values distinct-values
+                       :distinct-entities distinct-entities})]))
        (into {})))
 
 (comment

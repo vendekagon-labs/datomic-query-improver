@@ -72,11 +72,13 @@
         {:kind :rule :requires (set/intersection vars bound-before) :binds vars})
 
       :else
-      {:kind :data-pattern
-       :requires #{}
-       :binds (form->vars body)
-       :attr (let [a (second body)]
-               (when (keyword? a) a))})))
+      (let [[e a v] body]
+        {:kind :data-pattern
+         :requires #{}
+         :binds (form->vars body)
+         :e e
+         :attr (when (keyword? a) a)
+         :v v}))))
 
 (defn- analyze-clauses
   "clause-info for each clause, in order, given the vars bound by :in."
@@ -106,16 +108,62 @@
        (into {})))
 
 
+(defn- known?
+  "True if x is a constant or an already bound var."
+  [bound x]
+  (and (some? x)
+       (not= '_ x)
+       (or (not (symbol? x))
+           (contains? bound x))))
+
+(defn- estimated-datoms
+  "Estimates the datoms a clause will match given the vars bound so far.
+
+  attr-stats values are either a datom count, used as is, or a map of
+  {:count n :distinct-values v :distinct-entities e} (as computed by
+  dev/statistics.clj), from which the datoms per bound entity or value are
+  estimated."
+  [attr-stats bound {:keys [kind e attr v]}]
+  (let [stats (get attr-stats attr)]
+    (cond
+      (not= :data-pattern kind) 0
+      ;; Note: defaults to counting "0" for any attributes not included in stats
+      (nil? stats) 0
+      (number? stats) stats
+      :else
+      (let [{:keys [count distinct-values distinct-entities]} stats
+            e-known (known? bound e)
+            v-known (known? bound v)]
+        (cond
+          (and e-known v-known) 1
+          (and e-known distinct-entities) (/ count (max 1 distinct-entities))
+          (and v-known distinct-values) (/ count (max 1 distinct-values))
+          :else count)))))
+
+(defn- score
+  "Ranks a clause (as per clause-info) that is ready to be placed next, given
+  the vars bound so far; lowest is best. Heuristics, in order: join along
+  (fewest new vars), most selective (fewest estimated datoms), then the
+  clause's original position."
+  [attr-stats bound {:keys [binds index] :as info}]
+  [(count (set/difference binds bound))
+   (estimated-datoms attr-stats bound info)
+   index])
+
 (defn suggest
   "Given dictionary of attribute counts (as per stats/retrieve or derived from
   db-stats) and list or map form query, returns a map form query in which
   :where clauses have been (possibly) re-ordered into a more efficient ordering.
   Uses two heuristics: join along, and most restrictive clauses first.
 
+  Attribute counts may instead be maps of {:count :distinct-values
+  :distinct-entities} (see dev/statistics.clj), which lets selectivity account
+  for clauses whose entity or value is already bound or a constant.
+
   A clause is only placed once the vars it needs bound are bound (e.g. the
   inputs of a predicate, or the join vars of a not-join), so a valid query
   stays valid. Ties keep the clauses' original relative order."
-  [attr-counts q-edn]
+  [attr-stats q-edn]
   (let [q (if (map? q-edn)
             q-edn
             (->map-form q-edn))
@@ -127,13 +175,8 @@
       (if-not (seq remaining)
         (assoc q :where out-ordering)
         (let [ready (filter #(set/subset? (:requires %) bound) remaining)
-              score (fn [{:keys [binds attr index]}]
-                      ;; Note: defaults to counting "0" for any attributes not included in stats
-                      [(count (set/difference binds bound))
-                       (get attr-counts attr 0)
-                       index])
               best (if (seq ready)
-                     (apply min-key* score ready)
+                     (apply min-key* #(score attr-stats bound %) ready)
                      ;; nothing's requirements are met (e.g. a predicate that the original
                      ;; query placed before its inputs are bound): keep original order
                      (first remaining))]
